@@ -1,0 +1,4 @@
+# Ignorar o arquivo de chaves ao enviar para o GitHub
+config.js
+.env
+node_modules/
