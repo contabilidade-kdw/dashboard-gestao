@@ -31,6 +31,7 @@ serve(async (req) => {
     const allowedEmails = [
       'contabilidade@dawadm.net',
       'fiscal1@dawadm.net',
+      'maicon@dawadm.net',
       
     ]
 
