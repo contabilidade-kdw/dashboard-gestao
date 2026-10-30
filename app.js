@@ -41,7 +41,7 @@ Chart.defaults.color = '#8a94a3';
 Chart.defaults.maintainAspectRatio = false;
 
 const TABS = { dash: 'Dashboard', lan: 'Lançamentos', con: 'Contratos', ban: 'Bancos', dre: 'DRE', rep: 'Corretores', rel: 'Relatório do cliente' };
-let D = { lan: [], con: [], rep: [] }, F = {}, tab = 'dash', charts = {}, srcName = 'Google Sheets (Supabase)';
+let D = { lan: [], con: [], rep: [], sal: [] }, F = {}, tab = 'dash', charts = {}, srcName = 'Google Sheets (Supabase)';
 let metas = [];
 
 // Parser adaptado para matriz de arrays recebida via Sheets API
@@ -54,10 +54,24 @@ function parseRawSheets(sheetsMap) {
 
   const tp = t => /^ent/i.test(t || '') ? 'Entrada' : 'Saída';
   const L = [];
+  // Saldo anterior do BB PJ que a leitura normal não aproveita (sem data, valor em texto ou status diferente de Realizado)
+  const SAL = [];
+  const reSaldo = /saldo\s*(anterior|inicial|de\s*abertura)/i, reBB = /bb\s*pj/i;
+  const nv = x => {
+    if (typeof x === 'number') return x;
+    let t = String(x ?? '').replace(/R\$|\s/g, '');
+    if (/^\(.*\)$/.test(t)) t = '-' + t.slice(1, -1);
+    if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+    return t === '' ? NaN : Number(t);
+  };
 
   getRows('lancamentos').slice(1).forEach(r => {
     const d = parseDateValue(r[0]);
     const v = Number(r[6]);
+    if ([r[1], r[4], r[2]].some(x => reSaldo.test(String(x ?? ''))) && [r[1], r[4], r[8]].some(x => reBB.test(String(x ?? ''))) && !(d && !isNaN(v) && (r[7] || 'Realizado') == 'Realizado')) {
+      const sv = nv(r[6]);
+      if (!isNaN(sv)) SAL.push({ d, desc: r[1] || 'Saldo anterior', conta: r[8] || 'BB PJ', st: 'Realizado', v: /^sa[ií]da/i.test(String(r[3] ?? '')) ? -Math.abs(sv) : sv });
+    }
     if (d && !isNaN(v)) {
       L.push({
         d,
@@ -135,7 +149,7 @@ function parseRawSheets(sheetsMap) {
       };
     });
 
-  return { lan: L, con, rep };
+  return { lan: L, con, rep, sal: SAL };
 }
 
 function loadData(d, name) {
@@ -263,14 +277,23 @@ function body() {
     dn('c3', Sd); dn('c4', E);
   }
   if (tab == 'lan') {
-    const a = fl(), sec = (t, L, cls, asc) => {
-      if (!L.length) return '';
-      L = L.slice().sort((x, y) => asc ? x.d.localeCompare(y.d) : y.d.localeCompare(x.d));
-      const e = sum(L.filter(x => x.tipo == 'Entrada'), x => x.v), s = sum(L.filter(x => x.tipo != 'Entrada'), x => x.v);
-      return `<div class="sh ${cls}">${t}<span>${L.length} lançamentos</span></div>` + kp([['Entradas', R(e), 'pos'], ['Saídas', R(s), 'neg'], ['Resultado', R(e - s), e >= s ? 'pos' : 'neg']]) + tbl([['Data'], ['Descrição'], ['Categoria'], ['Tipo'], ['Valor', 1], ['Status'], ['Conta']], L.map(x => [fd(x.d), esc(x.desc.slice(0, 70)), esc(x.cat), x.tipo, `<span class="${x.tipo == 'Entrada' ? 'pos' : 'neg'}">${R(x.v)}</span>`, esc(x.st), esc(x.conta)]));
-    };
-    el.innerHTML = sec('Lançamentos realizados', a.filter(x => x.st == 'Realizado'), 'rz', false) + sec('Lançamentos projetados (a realizar)', a.filter(x => x.st != 'Realizado'), 'pj', true) || '<div class="note">Nenhum lançamento encontrado com os filtros atuais.</div>';
-  }
+  const a = fl(), sec = (t, L, cls, asc) => {
+    if (!L.length) return '';
+    L = L.slice().sort((x, y) => asc ? x.d.localeCompare(y.d) : y.d.localeCompare(x.d));
+    const e = sum(L.filter(x => x.tipo == 'Entrada'), x => x.v), s = sum(L.filter(x => x.tipo != 'Entrada'), x => x.v);
+    return `<div class="sh ${cls}">${t}<span>${L.length} lançamentos</span></div>` + kp([['Entradas', R(e), 'pos'], ['Saídas', R(s), 'neg'], ['Resultado', R(e - s), e >= s ? 'pos' : 'neg']]) + tbl([['Data'], ['Descrição'], ['Categoria'], ['Tipo'], ['Valor', 1], ['Status'], ['Conta']], L.map(x => [fd(x.d), esc(x.desc.slice(0, 70)), esc(x.cat), x.tipo, `<span class="${x.tipo == 'Entrada' ? 'pos' : 'neg'}">${R(x.v)}</span>`, esc(x.st), esc(x.conta)]));
+  };
+
+  const isTodos = !F.st || F.st == 'Todos';
+
+  el.innerHTML = (
+    isTodos
+      ? sec('Todos os lançamentos', a, 'td', false)
+      : sec('Lançamentos realizados', a.filter(x => x.st == 'Realizado'), 'rz', false) + 
+        sec('Lançamentos projetados (a realizar)', a.filter(x => x.st != 'Realizado'), 'pj', true)
+  ) || '<div class="note">Nenhum lançamento encontrado com os filtros atuais.</div>';
+}
+
   if (tab == 'con') {
     const a = cf(), t = sum(a, x => x.tot), r = sum(a, x => x.rec), i = sum(a, x => x.inad), tx = t ? i / t : 0;
     const vw = F.cv || 'ambos', cg = F.cg || 'pag';
@@ -295,22 +318,24 @@ function body() {
   if (tab == 'ban') {
     const sg = x => x.tipo == 'Entrada' ? x.v : -x.v, en = x => x.tipo == 'Entrada';
     const R0 = D.lan.filter(x => x.st == 'Realizado' && (!F.conta || ct(x) == F.conta));
-    const ini = F.de ? sum(R0.filter(x => x.d < F.de), sg) : 0;
+    const salBase = (D.sal || []).filter(x => ct(x) !== 'BB PJ').concat([{ conta: 'BB PJ', v: 20823.74 }]);
+    const SA = salBase.filter(x => !F.conta || ct(x) == F.conta);  
+    const ini = sum(SA, x => x.v) + (F.de ? sum(R0.filter(x => x.d < F.de), sg) : 0);
     let sd = ini;
     const full = R0.filter(x => inPer(x.d)).sort((x, y) => x.d.localeCompare(y.d)).map(x => ({ ...x, sd: sd += sg(x) }));
     const q = (F.q || '').toLowerCase();
     const rows = full.filter(x => (!F.tipo || x.tipo == F.tipo) && (!q || (x.desc + x.obs + x.cat + ct(x)).toLowerCase().includes(q)));
     const e = sum(rows.filter(en), x => x.v), s = sum(rows.filter(x => !en(x)), x => x.v);
-    const cts = [...new Set(R0.map(ct))].sort();
+    const cts = [...new Set([...R0.map(ct), ...SA.map(ct)])].sort();
     const resumo = cts.map(c => {
-      const L = R0.filter(x => ct(x) == c), i0 = F.de ? sum(L.filter(x => x.d < F.de), sg) : 0, P0 = L.filter(x => inPer(x.d));
+      const L = R0.filter(x => ct(x) == c), i0 = sum(SA.filter(x => ct(x) == c), x => x.v) + (F.de ? sum(L.filter(x => x.d < F.de), sg) : 0), P0 = L.filter(x => inPer(x.d));
       const ce = sum(P0.filter(en), x => x.v), cs = sum(P0.filter(x => !en(x)), x => x.v);
       return [esc(c), R(i0), `<span class="pos">${R(ce)}</span>`, `<span class="neg">${R(cs)}</span>`, `<b class="${i0 + ce - cs >= 0 ? 'pos' : 'neg'}">${R(i0 + ce - cs)}</b>`, i0, ce, cs];
     });
     const tI = sum(resumo, x => x[5]), tE = sum(resumo, x => x[6]), tS = sum(resumo, x => x[7]);
     if (resumo.length > 1) resumo.push(['<b>Total</b>', `<b>${R(tI)}</b>`, `<b class="pos">${R(tE)}</b>`, `<b class="neg">${R(tS)}</b>`, `<b>${R(tI + tE - tS)}</b>`]);
     el.innerHTML = kp([['Saldo inicial', R(ini), ini < 0 ? 'neg' : ''], ['Entradas', R(e), 'pos'], ['Saídas', R(s), 'neg'], ['Variação no período', R(e - s), e >= s ? 'pos' : 'neg'], ['Saldo final', R(sd), sd >= 0 ? 'pos' : 'neg']]) +
-      `<div class="note">Considera apenas lançamentos com status Realizado (movimentação efetiva) em todas as contas, incluindo itens não operacionais como retiradas e aplicações. O saldo inicial soma as movimentações realizadas anteriores à data “De”${F.tipo ? '; saldo inicial e final consideram todas as movimentações, mesmo com o filtro de entradas/saídas ativo' : ''}.</div>` +
+      `<div class="note">Considera apenas lançamentos com status Realizado (movimentação efetiva) em todas as contas, incluindo itens não operacionais como retiradas e aplicações. O saldo inicial soma o saldo anterior do BB PJ informado na planilha e as movimentações realizadas anteriores à data “De”${F.tipo ? '; saldo inicial e final consideram todas as movimentações, mesmo com o filtro de entradas/saídas ativo' : ''}.</div>` +
       `<div class="sh">Resumo por conta<span>${cts.length} conta(s)</span></div>` + tbl([['Conta'], ['Saldo inicial', 1], ['Entradas', 1], ['Saídas', 1], ['Saldo final', 1]], resumo.map(x => x.slice(0, 5))) +
       `<div class="g">${cv('c1', 'Entradas x Saídas por mês')}</div>` +
       `<div class="sh">Movimentação<span>${rows.length} lançamentos · mais recentes primeiro</span></div>` +
