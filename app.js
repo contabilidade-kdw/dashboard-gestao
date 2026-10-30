@@ -126,7 +126,7 @@ function parseRawSheets(sheetsMap) {
         d: parseDateValue(g('DATA VENDA')),
         tipo: g('TIPO') || '',
         imovel: g('IMÓVEL') || '',
-        tot: Number(g('VALOR TOTAL DA COMISSÃO')) || 0,
+        tot: nv(g('VALOR TOTAL DA COMISSÃO')) || 0,
         rec: Number(g('VALOR RECEBIDO')) || 0,
         pen: Number(g('SALDO PENDENTE RECEBIMENTO')) || 0,
         inad: Number(g('Valor Inadimplente') || g('VALOR INADIMPLENTE')) || 0,
@@ -413,24 +413,29 @@ function dre() {
 }
 
 // ---------- Metas (compartilhadas via tabela "metas" no Supabase) ----------
+// ---------- Metas (compartilhadas via tabela "metas" no Supabase) ----------
 const loadMetas = async () => {
   const { data, error } = await supabase.from('metas').select('*').order('created_at', { ascending: true });
-  if (error) { console.error('Metas:', error); toast('Não foi possível carregar as metas (a tabela "metas" foi criada no Supabase?).'); return; }
+  if (error) { console.error('Metas:', error); toast('Não foi possível carregar as metas.'); return; }
   metas = data || [];
 };
+
 const num = s => { s = String(s ?? '').trim(); if (!s) return NaN; if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); return Number(s); };
-const META_T = { rec: 'Receitas operacionais', res: 'Resultado operacional (entradas − saídas)', desp: 'Limite de despesas operacionais' };
 
 async function addMeta() {
-  const nome = $('#mt-nome').value.trim() || 'Meta', tipo = $('#mt-tipo').value, valor = num($('#mt-val').value), de = $('#mt-de').value, ate = $('#mt-ate').value;
+  const nome = $('#mt-nome').value.trim() || 'Meta', valor = num($('#mt-val').value), de = $('#mt-de').value, ate = $('#mt-ate').value;
+  const tipo = 'rec'; 
+  
   if (!(valor > 0)) return toast('Informe o valor da meta (maior que zero).');
   if (!de || !ate) return toast('Informe o período da meta (de / até).');
   if (de > ate) return toast('A data inicial da meta é maior que a final.');
+  
   const { error } = await supabase.from('metas').insert({ nome, tipo, valor, de, ate });
   if (error) { console.error('Metas:', error); return toast('Não foi possível salvar a meta.'); }
+  
   await loadMetas();
   body();
-  toast('Meta adicionada e compartilhada.');
+  toast('Meta adicionada com sucesso.');
 }
 
 async function delMeta(id) {
@@ -441,22 +446,59 @@ async function delMeta(id) {
 }
 
 function metaCalc(m) {
-  const en = x => x.tipo == 'Entrada', L = D.lan.filter(x => OP(x) && x.d >= m.de && x.d <= m.ate);
-  const f = rows => m.tipo == 'rec' ? sum(rows.filter(en), x => x.v) : m.tipo == 'desp' ? sum(rows.filter(x => !en(x)), x => x.v) : sum(rows.filter(en), x => x.v) - sum(rows.filter(x => !en(x)), x => x.v);
-  const real = f(L.filter(x => x.st == 'Realizado')), prev = f(L.filter(x => x.st != 'Realizado'));
-  return { real, prev, falta: m.valor - real, pct: m.valor ? real / m.valor : 0 };
+  // 1. O SEGREDO ESTÁ AQUI: Usar D.con (Contratos) e não D.lan (Lançamentos)
+  // Filtra usando a Data da Venda (x.d) que cai no período da meta
+  const contratosNoPeriodo = D.con.filter(x => x.d >= m.de && x.d <= m.ate);
+  
+  // 2. Soma o VALOR TOTAL DA VENDA (x.tot), independente de quando será pago
+  const real = sum(contratosNoPeriodo, x => x.tot); 
+  
+  const rec = sum(contratosNoPeriodo, x => x.rec);
+  const pen = sum(contratosNoPeriodo, x => x.pen);
+  
+  return { real, rec, pen, falta: m.valor - real, pct: m.valor ? real / m.valor : 0 };
 }
 
 function metasHtml() {
   const t = new Date(), y = t.getFullYear(), mo = t.getMonth();
+  
   const rowsM = metas.map(m => {
-    const c = metaCalc(m), desp = m.tipo == 'desp', over = desp ? c.pct > 1 : false;
-    const st = desp ? (c.falta >= 0 ? `<span class="pos">Disponível ${R(c.falta)}</span>` : `<span class="neg">Excedido em ${R(-c.falta)}</span>`) : (c.falta > 0 ? R(c.falta) : '<span class="pos">Meta atingida</span>');
-    return [`<b>${esc(m.nome)}</b><br><span class="sub">${META_T[m.tipo]}</span>`, `${fd(m.de)} a ${fd(m.ate)}`, R(m.valor), R(c.real), st, `${P(c.pct)}<div class="bar"><i class="${over ? 'over' : ''}" style="width:${Math.max(0, Math.min(100, c.pct * 100))}%"></i></div>`, R(c.prev), R(c.real + c.prev), `<button class="ghost noprint" data-delmeta="${m.id}">Excluir</button>`];
+    const c = metaCalc(m);
+    const st = c.falta > 0 ? R(c.falta) : '<span class="pos">Meta atingida</span>';
+    
+    return [
+      `<b>${esc(m.nome)}</b>`, 
+      `${fd(m.de)} a ${fd(m.ate)}`, 
+      R(m.valor), 
+      `<b>${R(c.real)}</b>`, // Traz o x.tot (Valor cheio da venda)
+      st, 
+      `${P(c.pct)}<div class="bar"><i style="width:${Math.max(0, Math.min(100, c.pct * 100))}%"></i></div>`, 
+      R(c.rec), 
+      R(c.pen), 
+      `<button class="ghost noprint" data-delmeta="${m.id}">Excluir</button>`
+    ];
   });
-  return `<h2>7. Metas</h2><p class="note">Cadastre uma meta para um período. Os valores são recalculados a cada atualização da planilha, com base nos lançamentos operacionais (receitas de comissões e despesas fixas e variáveis). As metas são compartilhadas entre todos os usuários autorizados.</p>` +
-    `<div class="ctl noprint"><label>Nome da meta<input id="mt-nome" placeholder="Ex.: Receita do 1º semestre"></label><label>Tipo<select id="mt-tipo"><option value="rec">${META_T.rec}</option><option value="res">${META_T.res}</option><option value="desp">${META_T.desp}</option></select></label><label>Valor da meta (R$)<input id="mt-val" placeholder="Ex.: 50.000,00"></label><label>De<input type="date" id="mt-de" value="${iso(new Date(y, mo, 1))}"></label><label>Até<input type="date" id="mt-ate" value="${iso(new Date(y, mo + 1, 0))}"></label><button id="mt-add">Adicionar meta</button></div>` +
-    (rowsM.length ? tbl([['Meta'], ['Período'], ['Meta (R$)', 1], ['Realizado', 1], ['Falta realizar', 1], ['Progresso', 1], ['Previsto no período', 1], ['Realizado + previsto', 1], ['']], rowsM) : '<div class="note">Nenhuma meta cadastrada ainda.</div>');
+
+  return `<h2>7. Metas de Vendas (Comissões)</h2>
+    <p class="note">As metas baseiam-se na <b>Data da Venda</b> e somam o <b>Valor Total de Comissão</b> dos contratos assinados no período correspondente.</p>
+    <div class="ctl noprint">
+      <label>Nome da meta<input id="mt-nome" placeholder="Ex.: Meta de Vendas 1º sem."></label>
+      <label>Valor da meta (R$)<input id="mt-val" placeholder="Ex.: 50.000,00"></label>
+      <label>De<input type="date" id="mt-de" value="${iso(new Date(y, mo, 1))}"></label>
+      <label>Até<input type="date" id="mt-ate" value="${iso(new Date(y, mo + 1, 0))}"></label>
+      <button id="mt-add">Adicionar meta</button>
+    </div>` +
+    (rowsM.length ? tbl([
+      ['Meta'], 
+      ['Período (Data da Venda)'], 
+      ['Alvo (R$)', 1], 
+      ['Vendido no Período', 1], 
+      ['Falta Vender', 1], 
+      ['Progresso', 1], 
+      ['Já Recebido', 1], 
+      ['A Receber (2027+)', 1], 
+      ['']
+    ], rowsM) : '<div class="note">Nenhuma meta cadastrada ainda.</div>');
 }
 
 // ---------- Relatório do cliente ----------
